@@ -1,0 +1,23 @@
+services:
+  immich-rtsp:
+    build: .
+    container_name: immich-rtsp
+    restart: unless-stopped
+    environment:
+      IMMICH_SERVER_URL: ${IMMICH_SERVER_URL}
+      IMMICH_API_KEY: ${IMMICH_API_KEY}
+      IMMICH_ALBUM_NAMES: ${IMMICH_ALBUM_NAMES:-Family,Vacation}
+      PHOTO_COUNT: ${PHOTO_COUNT:-20}
+      SECONDS_PER_IMAGE: ${SECONDS_PER_IMAGE:-15}
+      REFRESH_INTERVAL_HOURS: ${REFRESH_INTERVAL_HOURS:-24}
+      RTSP_PORT: ${RTSP_PORT:-8554}
+      WIDTH: ${WIDTH:-1920}
+      HEIGHT: ${HEIGHT:-1080}
+    ports:
+      - "8554:8554/tcp"
+      - "8554:8554/udp"
+    volumes:
+      - immich_rtsp_data:/data
+
+volumes:
+  immich_rtsp_data:

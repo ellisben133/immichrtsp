@@ -1,0 +1,10 @@
+backup/
+shots/
+apk-inspect/
+.tv_host
+secrets/
+*.apk
+docker/immich-rtsp/.env
+cache/
+__pycache__/
+*.pyc
