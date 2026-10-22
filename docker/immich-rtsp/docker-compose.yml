@@ -3,6 +3,8 @@ services:
     image: bluenviron/mediamtx:latest
     container_name: immich-rtsp-mediamtx
     restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.3
     environment:
       # Default readTimeout/writeTimeout (10s) was killing the publisher
       # connection well before anything was actually wrong with it.
@@ -19,6 +21,15 @@ services:
     restart: unless-stopped
     depends_on:
       - mediamtx
+    # Hard caps so this can never again threaten whatever else is running
+    # on the host, regardless of what goes wrong -- after the first version
+    # OOM'd a 2 CPU / 4GB shared container by keeping every photo open as
+    # a simultaneous live ffmpeg input. The new render-then-stream design
+    # (see app.py) shouldn't need anywhere near this much, but a hard
+    # ceiling costs nothing and means a future bug fails loudly (OOM-killed
+    # container, visible in logs) instead of starving the whole host.
+    mem_limit: 768m
+    cpus: 1.0
     environment:
       IMMICH_SERVER_URL: ${IMMICH_SERVER_URL}
       IMMICH_API_KEY: ${IMMICH_API_KEY}

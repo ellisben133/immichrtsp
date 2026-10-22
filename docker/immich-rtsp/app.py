@@ -19,10 +19,17 @@ Config via environment variables (see .env.example):
   (default rtsp://mediamtx:8554/wallpaper)
   WIDTH (default 1920), HEIGHT (default 1080)
 
-Each full cycle through the photo set is one ffmpeg invocation (built as a
-chained xfade filter graph across N per-image inputs); it exits normally
-after the last crossfade finishes, and the main loop below restarts it --
-that's what makes it loop forever, not an internal ffmpeg loop flag.
+Two-stage design (changed after an earlier version OOM'd a 2 CPU / 4GB
+shared host): a *render* step builds the crossfaded slideshow into an
+actual video file, combining photos two at a time in a chain (never more
+than 2 real-time-ish inputs open at once, regardless of how many photos
+are configured -- bounded resource use independent of PHOTO_COUNT). A
+separate, much cheaper *stream* step just loops that finished file to
+mediamtx with -c copy (no decode/encode/filtering at all, tiny constant
+footprint). The first version instead kept every photo as a simultaneous
+live input for the entire streaming lifetime -- correct output, but a
+completely different and much heavier resource profile that wasn't caught
+by local testing with only 3 images.
 """
 import json
 import os
@@ -38,6 +45,7 @@ from pathlib import Path
 
 DATA_DIR = Path("/data")
 IMAGES_DIR = DATA_DIR / "images"
+SLIDESHOW_PATH = DATA_DIR / "slideshow.mp4"
 
 SERVER_URL = os.environ["IMMICH_SERVER_URL"]
 API_KEY = os.environ["IMMICH_API_KEY"]
@@ -150,63 +158,112 @@ def sync_images():
     tmp_dir.rename(IMAGES_DIR)
 
     log(f"Synced {len(written)} images, {total_mb:.1f} MB total.")
+    render_slideshow(sorted(IMAGES_DIR.glob("*.jpg")))
     return True
 
 
-def build_xfade_cmd(images):
-    """One ffmpeg invocation that crossfades through `images` once, then
-    exits normally -- the main loop restarts it, which is what makes the
-    whole thing loop forever. Each image is its own input (needed for
-    xfade, unlike the old single concat-demuxer input)."""
-    cmd = ["ffmpeg", "-y", "-loglevel", "warning"]
-    for img in images:
-        cmd += ["-re", "-loop", "1", "-t", str(SECONDS_PER_IMAGE + FADE_SECONDS), "-i", str(img)]
+def _scale_pad_expr():
+    return (
+        f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
+        f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1"
+    )
 
-    filters = []
-    for i in range(len(images)):
-        filters.append(
-            f"[{i}:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1[v{i}]"
-        )
 
-    prev_label = "v0"
-    for i in range(1, len(images)):
-        offset = i * SECONDS_PER_IMAGE
-        out_label = f"vx{i}"
-        filters.append(
-            f"[{prev_label}][v{i}]xfade=transition=fade:duration={FADE_SECONDS}:offset={offset}[{out_label}]"
-        )
-        prev_label = out_label
+def _scale_pad_filter(input_label, output_label):
+    return f"[{input_label}]{_scale_pad_expr()}[{output_label}]"
 
-    cmd += [
-        "-filter_complex", ";".join(filters),
-        "-map", f"[{prev_label}]",
-        "-r", "25",
-        "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
-        "-g", "50",
-        "-rtsp_transport", "tcp",
-        "-f", "rtsp", RTSP_PUBLISH_URL,
-    ]
-    return cmd
+
+def _run_ffmpeg_render(cmd, out_path):
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not out_path.exists():
+        log(f"render step failed (code {result.returncode}):")
+        log(result.stderr[-2000:])
+        raise RuntimeError("ffmpeg render step failed")
+
+
+def render_slideshow(images):
+    """Builds the crossfaded slideshow as an actual file, combining photos
+    two at a time in a chain -- at most 2 real inputs open in any single
+    ffmpeg call, regardless of how many photos there are. Runs once per
+    sync (REFRESH_INTERVAL_HOURS), not continuously, so a brief CPU/memory
+    cost here is fine even on a small shared host."""
+    render_dir = DATA_DIR / "render"
+    if render_dir.exists():
+        shutil.rmtree(render_dir)
+    render_dir.mkdir(parents=True, exist_ok=True)
+
+    hold_tail = SECONDS_PER_IMAGE + FADE_SECONDS
+
+    if len(images) == 1:
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "warning",
+            "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(images[0]),
+            "-vf", _scale_pad_expr(),
+            "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+            str(render_dir / "final.mp4"),
+        ]
+        log("Rendering single-image slideshow...")
+        _run_ffmpeg_render(cmd, render_dir / "final.mp4")
+    else:
+        prev_file = render_dir / "step000.mp4"
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "warning",
+            "-loop", "1", "-t", str(hold_tail), "-i", str(images[0]),
+            "-vf", _scale_pad_expr(),
+            "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+            str(prev_file),
+        ]
+        log(f"Rendering slideshow, step 1/{len(images)}...")
+        _run_ffmpeg_render(cmd, prev_file)
+        prev_duration = hold_tail
+
+        for i in range(1, len(images)):
+            out_file = render_dir / f"step{i:03d}.mp4"
+            offset = prev_duration - FADE_SECONDS
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "warning",
+                "-i", str(prev_file),
+                "-loop", "1", "-t", str(hold_tail), "-i", str(images[i]),
+                "-filter_complex",
+                # xfade requires both inputs to share a timebase; the
+                # already-encoded prev_file and a fresh -loop 1 image
+                # source don't by default (found by actually running
+                # this, not by inspection -- "First input link main
+                # timebase do not match the corresponding second input
+                # link xfade timebase"). fps=25 on both normalizes it.
+                f"[0:v]fps=25[vprev];" + _scale_pad_filter("1:v", "vnew") +
+                f";[vprev][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset={offset}[vout]",
+                "-map", "[vout]",
+                "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+                str(out_file),
+            ]
+            log(f"Rendering slideshow, step {i + 1}/{len(images)}...")
+            _run_ffmpeg_render(cmd, out_file)
+            prev_file.unlink(missing_ok=True)
+            prev_file = out_file
+            prev_duration = prev_duration + SECONDS_PER_IMAGE
+
+        prev_file.rename(render_dir / "final.mp4")
+
+    tmp_path = DATA_DIR / "slideshow.mp4.new"
+    shutil.move(str(render_dir / "final.mp4"), str(tmp_path))
+    shutil.rmtree(render_dir, ignore_errors=True)
+    tmp_path.replace(SLIDESHOW_PATH)
+    log(f"Slideshow rendered: {SLIDESHOW_PATH} ({SLIDESHOW_PATH.stat().st_size / 1024 / 1024:.1f} MB)")
 
 
 def start_ffmpeg():
     global ffmpeg_proc
-    images = sorted(IMAGES_DIR.glob("*.jpg"))
-    if len(images) < 2:
-        # xfade needs at least 2 inputs; fall back to a static single image
-        # (still looped/paced in real time) if we somehow only have one.
-        cmd = [
-            "ffmpeg", "-y", "-loglevel", "warning",
-            "-re", "-loop", "1", "-i", str(images[0]),
-            "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
-                   f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
-            "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
-            "-g", "50", "-rtsp_transport", "tcp", "-f", "rtsp", RTSP_PUBLISH_URL,
-        ]
-    else:
-        cmd = build_xfade_cmd(images)
-    log(f"Starting ffmpeg ({len(images)} images): {' '.join(cmd)}")
+    # Just loop the pre-rendered file -- -c copy means no decode, encode,
+    # or filtering at all, trivial CPU/memory, regardless of how many
+    # photos are in it or how long it runs for.
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "warning",
+        "-re", "-stream_loop", "-1", "-i", str(SLIDESHOW_PATH),
+        "-c", "copy",
+        "-rtsp_transport", "tcp", "-f", "rtsp", RTSP_PUBLISH_URL,
+    ]
+    log(f"Starting ffmpeg (streaming {SLIDESHOW_PATH}): {' '.join(cmd)}")
     # stderr/stdout inherit the parent's (this process's) streams, so
     # ffmpeg's actual errors land directly in `docker logs` instead of
     # being swallowed in an unread pipe buffer.
@@ -249,8 +306,8 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not safe_sync_images() and not any(IMAGES_DIR.glob("*.jpg")):
-        sys.exit("Initial sync failed and no cached images exist. Exiting.")
+    if not safe_sync_images() and not SLIDESHOW_PATH.exists():
+        sys.exit("Initial sync failed and no cached slideshow exists. Exiting.")
 
     start_ffmpeg()
     last_sync = time.monotonic()

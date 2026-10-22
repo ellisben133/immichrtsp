@@ -13,8 +13,9 @@ Two containers:
 - **mediamtx** -- the actual RTSP server (official `bluenviron/mediamtx`
   image, zero custom code, pulled straight from Docker Hub). Exposes 8554.
 - **immich-rtsp** -- a small Python+ffmpeg publisher: pulls photos from
-  Immich, builds a looping crossfade slideshow, and *publishes* it to
-  mediamtx over the internal Docker network as a normal RTSP client.
+  Immich, *renders* a crossfaded slideshow to a video file, then
+  *streams* that file to mediamtx over the internal Docker network as a
+  normal RTSP client.
 
 (First attempt used ffmpeg's own built-in RTSP "listen" server mode
 instead of mediamtx, to avoid a second container -- it turned out
@@ -23,9 +24,26 @@ binding/listening, failing instantly on every run. Publishing to a real
 RTSP server is the standard, well-documented pattern, hence the second
 container.)
 
+**A second incident worth knowing about:** the crossfade feature's first
+version kept every configured photo open as a simultaneous real-time ffmpeg
+input for as long as the stream ran, rather than briefly during a render --
+correct output, but a fundamentally different and much heavier resource
+profile than local testing (done with only 3 images) revealed. At
+`PHOTO_COUNT=20` on a 2 CPU / 4GB host shared with other services, it drove
+memory to 98% and swap to 99.98%, hanging `docker stop`/`docker kill` and
+requiring a force-stop at the Proxmox host level to recover. The service
+now renders the crossfaded slideshow to a file first (combining photos two
+at a time in a chain -- never more than 2 real inputs open regardless of
+`PHOTO_COUNT`), and streams that finished file with `-c copy` (no decode,
+encode, or filtering at all during steady-state streaming). Both containers
+also now carry hard `mem_limit`/`cpus` caps in `docker-compose.yml`, so a
+future bug fails loudly (the container gets OOM-killed, visible in its own
+logs) instead of starving the host.
+
 **Verified working end to end** (2026-10-23): confirmed live on the actual
 TV, crossfading through real photos from both configured albums, via
-Projectivy's Media file source pointed at the stream.
+Projectivy's Media file source pointed at the stream -- both before and
+after the resource-usage fix above.
 
 ## 1. Copy the `docker/immich-rtsp/` folder to your server
 
@@ -60,10 +78,11 @@ Config reference:
 - `REFRESH_INTERVAL_HOURS` -- how often to pull a fresh set from Immich,
   restarting ffmpeg (brief reconnect blip on the TV) each time (default 24)
 
-Each full pass through the photo set is one ffmpeg process (built as a
-chained `xfade` filter graph across every photo as its own input); it exits
-normally once the last crossfade finishes, and the service just restarts it
--- that's what loops the slideshow, not an ffmpeg-internal loop flag.
+Each sync *renders* the crossfaded slideshow to a file (combining photos
+two at a time in a chain, never more than 2 real inputs open regardless of
+`PHOTO_COUNT`), then restarts the lightweight `-c copy` stream that loops
+that file to mediamtx -- see the resource-usage note above for why it's
+built this way and not as one continuous multi-input ffmpeg process.
 
 ## 3. Build the immich-rtsp image once via terminal
 
@@ -100,9 +119,12 @@ button -- just remember to re-run the terminal build step first if
 ## 5. Verify the stream actually works before touching Projectivy
 
 Check `immich-rtsp`'s logs first (Portainer or `docker logs immich-rtsp`)
--- you should see it list album photo counts, "Synced N images", then
-"Starting ffmpeg (N images): ..." with no repeating crash/restart after
-that.
+-- you should see it list album photo counts, "Synced N images", several
+"Rendering slideshow, step i/N..." lines, "Slideshow rendered: ...", then
+"Starting ffmpeg (streaming ...)" with no repeating crash/restart after
+that. Also worth a glance at the container's CPU/memory in Portainer
+during that render step the first time, to see it settle back down
+afterward (see the resource-usage note above).
 
 Then test the RTSP feed itself from any machine on your network:
 ```
