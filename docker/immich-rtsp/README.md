@@ -25,21 +25,37 @@ cp .env.example .env
 Edit it: at minimum set `IMMICH_SERVER_URL` and `IMMICH_API_KEY`. Defaults:
 20 photos, 15 seconds each, refreshed every 24h, served on port 8554.
 
-## 3. Deploy as a Portainer stack
+## 3. Build the image once via terminal
 
-In Portainer: **Stacks -> Add stack -> Upload**, upload this folder's
-`docker-compose.yml` (Portainer will look for `Dockerfile` and `app.py`
-alongside it since the compose file uses `build: .`), paste the contents of
-your `.env` into the stack's environment variables section (or upload it as
-the stack's `.env`), then **Deploy the stack**.
+The compose file references a pre-built local image (`immich-rtsp:latest`)
+rather than building inline -- Portainer's own build pipeline (BuildKit)
+turned out to be broken in this setup (`listing workers for Build` /
+`http2: frame too large` errors), so building happens here instead, once:
 
-Or from a shell on the server, if you'd rather:
 ```
-cd immich-rtsp
-docker compose up -d --build
+git clone https://github.com/ellisben133/immichrtsp.git
+cd immichrtsp/docker/immich-rtsp
+DOCKER_BUILDKIT=0 docker build -t immich-rtsp:latest .
 ```
 
-## 4. Verify the stream actually works before touching Projectivy
+(`DOCKER_BUILDKIT=0` uses Docker's classic builder, sidestepping the same
+buildx/BuildKit path that failed in Portainer.) Re-run this build command
+any time `app.py` or the `Dockerfile` changes (e.g. after a `git pull`).
+
+## 4. Deploy as a Portainer stack
+
+Portainer -> **Stacks** -> **Add stack** -> **Repository**, URL
+`https://github.com/ellisben133/immichrtsp.git`, ref `refs/heads/main`,
+compose path `docker/immich-rtsp/docker-compose.yml`. Paste your `.env`
+contents into the stack's environment variables. **Deploy the stack** --
+since the compose file has no `build:` directive, Portainer just starts
+the image you already built, no builder involved.
+
+If you update this repo later, use the stack's **Pull and redeploy**
+button -- just remember to re-run the terminal build step first if
+`app.py`/`Dockerfile` changed, otherwise it'll redeploy the old image.
+
+## 5. Verify the stream actually works before touching Projectivy
 
 Check the container logs first (`docker logs immich-rtsp` or via Portainer)
 -- you should see it list album photo counts and "Synced N images", then
@@ -54,7 +70,7 @@ your photos slowly cross-cutting. If it doesn't connect: check the
 container is still running (`docker ps`), check port 8554 isn't blocked by
 a firewall, and check the logs for an ffmpeg error.
 
-## 5. Point Projectivy at it
+## 6. Point Projectivy at it
 
 On the TV, in Projectivy: Settings -> Appearance -> Wallpaper -> Launcher
 wallpaper -> **Media file** -> Configure -> set **Uri** to

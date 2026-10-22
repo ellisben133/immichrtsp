@@ -1,6 +1,7 @@
 services:
   immich-rtsp:
-    build: .
+    image: immich-rtsp:latest
+    pull_policy: never
     container_name: immich-rtsp
     restart: unless-stopped
     environment:
