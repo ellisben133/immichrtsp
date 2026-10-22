@@ -122,6 +122,8 @@ def sync_images():
         shutil.rmtree(tmp_dir)
         return False
 
+    total_mb = sum(f.stat().st_size for f in written) / 1024 / 1024
+
     if IMAGES_DIR.exists():
         shutil.rmtree(IMAGES_DIR)
     tmp_dir.rename(IMAGES_DIR)
@@ -133,7 +135,6 @@ def sync_images():
     playlist_lines.append(f"file '{sorted(IMAGES_DIR.glob('*.jpg'))[0]}'")
     PLAYLIST_PATH.write_text("\n".join(playlist_lines) + "\n", encoding="utf-8")
 
-    total_mb = sum(f.stat().st_size for f in written) / 1024 / 1024
     log(f"Synced {len(written)} images, {total_mb:.1f} MB total.")
     return True
 
@@ -175,12 +176,24 @@ def handle_signal(signum, frame):
     sys.exit(0)
 
 
+def safe_sync_images():
+    """sync_images() wrapped so a transient Immich/network error logs and
+    returns False instead of killing the whole service."""
+    try:
+        return sync_images()
+    except Exception:
+        import traceback
+        log("Sync failed with an exception:")
+        traceback.print_exc()
+        return False
+
+
 def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not sync_images() and not PLAYLIST_PATH.exists():
+    if not safe_sync_images() and not PLAYLIST_PATH.exists():
         sys.exit("Initial sync failed and no cached playlist exists. Exiting.")
 
     start_ffmpeg()
@@ -195,7 +208,7 @@ def main():
             start_ffmpeg()
             continue
         if time.monotonic() - last_sync >= refresh_seconds:
-            if sync_images():
+            if safe_sync_images():
                 log("Restarting ffmpeg with refreshed images...")
                 stop_ffmpeg()
                 start_ffmpeg()
