@@ -89,18 +89,22 @@ Projectivy's wallpaper source was "Reddit" (hence the mountain/canyon
 photos). To use your own Immich library instead, we went through a few
 designs before landing on the current one:
 
-- **Current plan: `docker/immich-rtsp/`.** A small self-hosted service (one
-  Docker container, deploy as a Portainer stack on your own server) that
-  pulls photos from Immich and serves them as a looping RTSP slideshow.
-  Projectivy's **Media file** wallpaper source (free, not Premium-gated)
-  accepts a Uri + a Video toggle -- confirmed it lists "video (static or
-  RTSP live stream)" as a supported format. Point it at
-  `rtsp://<server-ip>:8554/wallpaper`, no file pushing to the TV at all, no
-  local storage growth, genuinely live. See `docker/immich-rtsp/README.md`.
-  **Note:** the ffmpeg/RTSP half of this is untested -- I didn't have
-  Docker or ffmpeg available to run it end-to-end in this session. Verify
-  it with `ffplay`/VLC before pointing Projectivy at it (step 4 in that
-  README).
+- **Current setup, verified working on the TV: `docker/immich-rtsp/`.** Two
+  small containers on your own server (deployed as a Portainer stack):
+  `mediamtx` (a real, independently maintained RTSP server) and
+  `immich-rtsp` (a small Python+ffmpeg publisher that pulls photos from
+  Immich and publishes a looping slideshow to it). Projectivy's **Media
+  file** wallpaper source (free, not Premium-gated) points its Uri at
+  `rtsp://<server-ip>:8554/wallpaper` with the Video toggle on -- no file
+  pushing to the TV, no local storage growth, genuinely live. Confirmed
+  rotating through real photos from both albums directly on the TV screen.
+  Getting there took a few rounds of debugging (Portainer's BuildKit was
+  broken unrelated to this project; ffmpeg's own built-in RTSP server mode
+  turned out unreliable, replaced with mediamtx; mediamtx's default 10s
+  timeout was killing the publisher) -- see `docker/immich-rtsp/README.md`
+  and that folder's git history for the detail. `LANDSCAPE_ONLY=true`
+  (default) filters out portrait photos, which otherwise show letterboxed
+  with black bars down the sides.
 - You already have Projectivy Premium, so the **Folder** source (point it
   at a local image directory on the TV) is also available if you'd rather
   not run the RTSP service. `tools/sync_immich_wallpapers.py` (runs from a
