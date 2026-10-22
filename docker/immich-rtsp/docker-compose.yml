@@ -3,6 +3,11 @@ services:
     image: bluenviron/mediamtx:latest
     container_name: immich-rtsp-mediamtx
     restart: unless-stopped
+    environment:
+      # Default readTimeout/writeTimeout (10s) was killing the publisher
+      # connection well before anything was actually wrong with it.
+      MTX_READTIMEOUT: 60s
+      MTX_WRITETIMEOUT: 60s
     ports:
       - "8554:8554/tcp"
       - "8554:8554/udp"
