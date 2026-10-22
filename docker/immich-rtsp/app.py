@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""Pulls photos from Immich albums and serves them as a looping RTSP
-slideshow via ffmpeg, for Projectivy Launcher's Media file wallpaper source
+"""Pulls photos from Immich albums and publishes them as a looping RTSP
+slideshow to a MediaMTX server (the 'mediamtx' service in the same compose
+stack), for Projectivy Launcher's Media file wallpaper source
 (Uri = rtsp://<this-host>:8554/wallpaper, Video toggle on).
+
+ffmpeg's own built-in RTSP "listen" server mode turned out to be
+unreliable in testing (it attempted an outbound connect() instead of
+actually binding/listening, failing instantly with "Connection refused"
+on every run regardless of -listen_timeout). Publishing to MediaMTX --
+purpose-built, actively maintained RTSP server software -- as a normal
+client is a far more standard, well-documented pattern.
 
 Config via environment variables (see .env.example):
   IMMICH_SERVER_URL, IMMICH_API_KEY, IMMICH_ALBUM_NAMES (comma separated)
   PHOTO_COUNT (default 20), SECONDS_PER_IMAGE (default 15)
-  REFRESH_INTERVAL_HOURS (default 24), RTSP_PORT (default 8554)
+  REFRESH_INTERVAL_HOURS (default 24), RTSP_PUBLISH_URL
+  (default rtsp://mediamtx:8554/wallpaper)
   WIDTH (default 1920), HEIGHT (default 1080)
 """
 import json
@@ -31,7 +40,7 @@ ALBUM_NAMES = [a.strip() for a in os.environ["IMMICH_ALBUM_NAMES"].split(",") if
 PHOTO_COUNT = int(os.environ.get("PHOTO_COUNT", "20"))
 SECONDS_PER_IMAGE = int(os.environ.get("SECONDS_PER_IMAGE", "15"))
 REFRESH_INTERVAL_HOURS = float(os.environ.get("REFRESH_INTERVAL_HOURS", "24"))
-RTSP_PORT = os.environ.get("RTSP_PORT", "8554")
+RTSP_PUBLISH_URL = os.environ.get("RTSP_PUBLISH_URL", "rtsp://mediamtx:8554/wallpaper")
 WIDTH = os.environ.get("WIDTH", "1920")
 HEIGHT = os.environ.get("HEIGHT", "1080")
 
@@ -143,16 +152,15 @@ def start_ffmpeg():
     global ffmpeg_proc
     cmd = [
         "ffmpeg", "-y", "-loglevel", "warning",
-        "-stream_loop", "-1",
+        "-re", "-stream_loop", "-1",
         "-f", "concat", "-safe", "0", "-i", str(PLAYLIST_PATH),
         "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
                f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
         "-r", "25",
         "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
         "-g", "50",
-        "-rtsp_flags", "listen",
-        "-listen_timeout", "-1",
-        "-f", "rtsp", f"rtsp://0.0.0.0:{RTSP_PORT}/wallpaper",
+        "-rtsp_transport", "tcp",
+        "-f", "rtsp", RTSP_PUBLISH_URL,
     ]
     log(f"Starting ffmpeg: {' '.join(cmd)}")
     # stderr/stdout inherit the parent's (this process's) streams, so
