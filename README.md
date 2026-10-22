@@ -1,166 +1,149 @@
-# Sony KD-65X7500F (Android TV 9) debloat project
+# immich-rtsp
 
-TV connected over network ADB at `192.168.1.XXX:5555`. All commands below
-assume `tools/tv.py` as the ADB wrapper (`TV_HOST`/`TV_PORT` env vars, or
-`.tv_host` file, pick the target; `ADB_BIN` picks the adb binary).
+Serves a looping RTSP slideshow of photos pulled from [Immich](https://immich.app/)
+albums, for use as a TV launcher's live background -- specifically built
+for [Projectivy Launcher](https://github.com/prjctvy/projectivy-launcher)
+on Android TV (Media file source, `rtsp://` Uri, Video toggle on), but the
+stream itself is plain RTSP and works with anything that can play one.
 
-## What this TV already had going in
+No file pushing to the TV, no cron+adb pipeline, just one stream URL that's
+always live.
 
-This was not a stock TV -- it already had ~28 sideloaded apps (Plex,
-Jellyfin, Crunchyroll, Netflix, Kodi, VLC, NordVPN, Steam Link, SmartTube,
-various AU streaming apps, etc.) and **Projectivy Launcher**
-(`com.spocky.projengmenu`) was already installed and set as the active Home
-launcher, replacing the stock one. None of those were touched.
+Two containers:
+- **mediamtx** -- the actual RTSP server (official `bluenviron/mediamtx`
+  image, zero custom code, pulled straight from Docker Hub). Exposes 8554.
+- **immich-rtsp** -- a small Python+ffmpeg publisher: pulls photos from
+  Immich, builds a looping crossfade slideshow, and *publishes* it to
+  mediamtx over the internal Docker network as a normal RTSP client.
 
-## What got disabled
+(First attempt used ffmpeg's own built-in RTSP "listen" server mode
+instead of mediamtx, to avoid a second container -- it turned out
+unreliable: it attempted an outbound `connect()` instead of actually
+binding/listening, failing instantly on every run. Publishing to a real
+RTSP server is the standard, well-documented pattern, hence the second
+container.)
 
-46 packages disabled via `pm disable-user --user 0`, never uninstalled. Full
-list: `backup/disabled_by_us.log`. Batches (see `batches/*.txt` for exact
-package lists, and `shots/` for before/after screenshots at each step):
+**Verified working end to end** (2026-10-23): confirmed live on the actual
+TV, crossfading through real photos from both configured albums, via
+Projectivy's Media file source pointed at the stream.
 
-1. **Telemetry/diagnostics/demo mode** -- Sony bug-report tools, log-level
-   settings, Samba TV (ACR/ad-tracking SDK), demo/retail modes, customer
-   support/remote-access tools, service-engineer mode (disabled, never
-   launched -- launching factory-mode apps can brick CEC/Input on some
-   boards, so we only ever inspected these with `dumpsys package`, never
-   `am start`).
-2. **Hotel/B2B (commercial) mode** -- not relevant to a home install.
-3. **Content/recommendation/ad services** -- Sony Select, Discovery,
-   BIVL info, Kenh Chon Loc, pre-install-app-filtering.
-4. **Miracast/DLNA casting** -- disabled since only Chromecast is used
-   (confirmed with you). `com.google.android.apps.mediashell` (Chromecast)
-   was left alone.
-5. **HbbTV/broadcast-interactive apps and the IR blaster** -- disabled since
-   neither is used (confirmed with you). Voice search
-   (`com.google.android.katniss`) was left alone.
-6. **Stock Google TV Launcher** (`com.google.android.tvlauncher`) -- this
-   was still installed and had the *highest* Home-intent priority on the
-   device, so Android briefly snapped Home back to its ad-laden UI
-   ("Mega Movie Week", "Buy for $5.99") when a package-state change reset
-   the Home preference mid-debloat. Disabled so only Projectivy can ever
-   claim Home again. Verified with `dumpsys activity activities | grep
-   mResumedActivity` after a reboot.
-7. **Misc low-value preloaded apps** -- manual/help viewer, second-display
-   setting.
+## 1. Copy the `docker/immich-rtsp/` folder to your server
 
-**Note:** `com.sony.dtv.imanual` and `com.sony.dtv.seconddispsetting`
-(batch 7) were found re-enabled by the firmware after a reboot. This board
-re-enables a small set of packages at every boot; re-disabling them each
-time isn't worth fighting. Everything else in the log stayed disabled
-across the reboot (verified: `backup/post-reboot-disabled.txt`).
+`Dockerfile`, `app.py`, `docker-compose.yml`, `.env.example` -- keep them
+together, in that same relative layout (`docker/immich-rtsp/`) if you're
+deploying straight from a clone of this repo, since the Portainer stack
+setup below (step 4) references that path.
 
-### What was deliberately left alone
-
-- Everything Android-core: permission controller, package installer, ext
-  services/shared, module metadata, `com.android.providers.*` (except the
-  usual calendar/contacts/userdict exclusions, which weren't touched
-  either), systemui, shell, phone, settings, tv.settings, `android`.
-- TV input/tuner (`com.sony.dtv.tvinput.*`), remote control/BT pairing,
-  on-screen keyboard (`com.sony.dtv.ime.chww`, `imeproxy`), Play Store,
-  Play Services.
-- HDMI-CEC / Bravia Sync (`com.sony.dtv.braviasync*`) -- needed for
-  controlling other HDMI devices from this remote.
-- `com.sony.dtv.systemupdate` (OTA updates), DIAL protocol service
-  (`com.sony.dtv.dialservice` -- used by some apps' "cast" features),
-  MediaTek SoC agents (tuner-adjacent, didn't want to risk it).
-- All 28 of your sideloaded streaming/utility apps.
-
-### `tools/disable.sh` safety behaviour
-
-Refuses to run (with no changes made) if the batch file contains anything
-matching the protected-package patterns baked into the script -- core
-Android packages or this device's functional packages (TV input, remote,
-keyboard, Play Store/Services). One run hit a `SecurityException` from the
-firmware on a single package (`com.sony.dtv.kenhchonloc`) that still ended
-up disabled despite the error -- the script trusts `pm list packages -d`
-over exit codes for exactly this reason; check that file if you're ever
-unsure what actually happened.
-
-## Launcher
-
-**Not replaced.** You already use Projectivy Launcher and were happy with
-it, so the custom Apple-TV-style launcher from the original plan was never
-built. See "Immich wallpaper" below for the one launcher-adjacent thing we
-did configure.
-
-## Immich photos as the launcher background
-
-Projectivy's wallpaper source was "Reddit" (hence the mountain/canyon
-photos). To use your own Immich library instead, we went through a few
-designs before landing on the current one:
-
-- **Current setup, verified working on the TV: `docker/immich-rtsp/`.** Two
-  small containers on your own server (deployed as a Portainer stack):
-  `mediamtx` (a real, independently maintained RTSP server) and
-  `immich-rtsp` (a small Python+ffmpeg publisher that pulls photos from
-  Immich and publishes a looping slideshow to it). Projectivy's **Media
-  file** wallpaper source (free, not Premium-gated) points its Uri at
-  `rtsp://<server-ip>:8554/wallpaper` with the Video toggle on -- no file
-  pushing to the TV, no local storage growth, genuinely live. Confirmed
-  rotating through real photos from both albums directly on the TV screen.
-  Getting there took a few rounds of debugging (Portainer's BuildKit was
-  broken unrelated to this project; ffmpeg's own built-in RTSP server mode
-  turned out unreliable, replaced with mediamtx; mediamtx's default 10s
-  timeout was killing the publisher) -- see `docker/immich-rtsp/README.md`
-  and that folder's git history for the detail. `LANDSCAPE_ONLY=true`
-  (default) filters out portrait photos, which otherwise show letterboxed
-  with black bars down the sides.
-- You already have Projectivy Premium, so the **Folder** source (point it
-  at a local image directory on the TV) is also available if you'd rather
-  not run the RTSP service. `tools/sync_immich_wallpapers.py` (runs from a
-  PC) or `docs/IMMICH_SYNC_SERVER_SETUP.md` (runs from your server via cron
-  + adb) both push a capped, randomly-sampled set of photos to
-  `/sdcard/Pictures/ImmichSync` on the TV for that source to read.
-- We also tried running a sync *on* the TV itself via Termux -- a plain
-  `pkg install python cronie` pulled in a 470MB clang/llvm/make toolchain,
-  way too heavy for a daily photo refresh, so Termux was installed and then
-  removed again.
-- A plain native Live Wallpaper app (self-hosted, no server) was considered
-  too, but ruled out: confirmed via `dumpsys window` that Projectivy's main
-  window doesn't carry `FLAG_SHOW_WALLPAPER`, so it never composites the
-  Android system wallpaper behind itself at all -- a Live Wallpaper
-  wouldn't show through Projectivy no matter how it was built.
-
-Credentials live in `secrets/immich.env` (gitignored, never commit it) and
-in `docker/immich-rtsp/.env` on the server (also gitignored).
-
-## Restoring everything
+## 2. Create your `.env`
 
 ```
-python tools/restore.py
+cd docker/immich-rtsp
+cp .env.example .env
 ```
 
-Re-enables every package in `backup/disabled_by_us.log`. Reboot afterward
-to confirm everything comes back. This does not touch Termux (already
-removed) or anything about the launcher (Projectivy was never disabled).
+Edit it: at minimum set `IMMICH_SERVER_URL` and `IMMICH_API_KEY` (an
+Immich API key: Immich web UI -> Account Settings -> API Keys). Defaults:
+20 photos, landscape-only, 15 seconds each with a 1.5s crossfade, refreshed
+every 24h.
 
-## Closing down ADB when you're done for the session
+Config reference:
+- `IMMICH_ALBUM_NAMES` -- comma-separated, exact album names to pull from
+- `PHOTO_COUNT` -- how many photos to keep per sync (default 20)
+- `LANDSCAPE_ONLY` -- `true`/`false` (default `true`). Portrait photos get
+  letterboxed with black bars on the sides rather than filling the screen,
+  so this filters them out using Immich's reported width/height.
+- `SECONDS_PER_IMAGE` -- how long each photo is held before crossfading to
+  the next (default 15). Change takes effect on the next ffmpeg restart
+  (next sync, or just restart the `immich-rtsp` container -- no rebuild
+  needed, it's an env var, not a code change)
+- `FADE_SECONDS` -- crossfade duration between photos (default 1.5)
+- `REFRESH_INTERVAL_HOURS` -- how often to pull a fresh set from Immich,
+  restarting ffmpeg (brief reconnect blip on the TV) each time (default 24)
 
-Per the original plan: when you're done working with the TV over ADB,
-switch off **USB debugging** and **Network/ADB debugging** in Developer
-Options, revoke USB debugging authorizations, and reboot. Then verify:
+Each full pass through the photo set is one ffmpeg process (built as a
+chained `xfade` filter graph across every photo as its own input); it exits
+normally once the last crossfade finishes, and the service just restarts it
+-- that's what loops the slideshow, not an ffmpeg-internal loop flag.
+
+## 3. Build the immich-rtsp image once via terminal
+
+Only `immich-rtsp` needs a local build -- `mediamtx` is a public image
+Portainer can pull directly with no builder involved. The compose file
+references a pre-built local image (`immich-rtsp:latest`) rather than
+building inline, since Portainer's own build pipeline (BuildKit) turned out
+broken in this setup (`listing workers for Build` / `http2: frame too
+large` errors):
 
 ```
-python tools/adb-closed.py 192.168.1.XXX
+git clone https://github.com/ellisben133/immichrtsp.git
+cd immichrtsp/docker/immich-rtsp
+DOCKER_BUILDKIT=0 docker build -t immich-rtsp:latest .
 ```
 
-This device is wired over its built-in Ethernet port (confirmed via
-`dumpsys usb | grep host_connected` = false and `dumpsys connectivity`
-showing `Transports: ETHERNET` on `eth0`, not a USB adapter), so there's no
-USB-adapter power-cycle concern here when you flip debugging off.
+(`DOCKER_BUILDKIT=0` uses Docker's classic builder, sidestepping the same
+buildx/BuildKit path that failed in Portainer.) Re-run this build command
+any time `app.py`/`Dockerfile` changes (e.g. after a `git pull`).
 
-Note: if you set up the server-side Immich sync (above), it depends on
-network ADB staying on. Turning off Network/ADB debugging will break the
-sync's cron job silently until you turn it back on and re-run
-`adb connect` from the server.
+## 4. Deploy as a Portainer stack
 
-## Everything else (screenshots, batches, raw backups)
+Portainer -> **Stacks** -> **Add stack** -> **Repository**, URL
+`https://github.com/ellisben133/immichrtsp.git`, ref `refs/heads/main`,
+compose path `docker/immich-rtsp/docker-compose.yml`. Paste your `.env`
+contents into the stack's environment variables. **Deploy the stack** --
+`mediamtx` gets pulled fresh, `immich-rtsp` just starts the image you
+already built.
 
-- `shots/` -- a screenshot after every change, in order, including the
-  Home-launcher flakiness investigation and the Projectivy settings
-  exploration that found the Wallpaper/Folder option.
-- `backup/<timestamp>/` -- full package list, disabled-package baseline,
-  `getprop`, all settings namespaces, display size/density, at the start of
-  the session, before anything was touched.
-- `batches/` -- the exact package lists passed to `tools/disable.sh` for
-  each step above.
+If you update this repo later, use the stack's **Pull and redeploy**
+button -- just remember to re-run the terminal build step first if
+`app.py`/`Dockerfile` changed, otherwise it'll redeploy the old image.
+
+## 5. Verify the stream actually works before touching Projectivy
+
+Check `immich-rtsp`'s logs first (Portainer or `docker logs immich-rtsp`)
+-- you should see it list album photo counts, "Synced N images", then
+"Starting ffmpeg (N images): ..." with no repeating crash/restart after
+that.
+
+Then test the RTSP feed itself from any machine on your network:
+```
+ffplay rtsp://<server-ip>:8554/wallpaper
+```
+or open that same URL in VLC (Media -> Open Network Stream). You should see
+your photos crossfading. If it doesn't connect: check both containers are
+running (`docker ps`), check port 8554 isn't blocked by a firewall on the
+server, and check `immich-rtsp`'s logs for an ffmpeg error (it should
+mention actually connecting/publishing to mediamtx, not a "Connection
+refused").
+
+## 6. Point Projectivy at it
+
+On the TV, in Projectivy: Settings -> Appearance -> Wallpaper -> Launcher
+wallpaper -> **Media file** -> Configure -> set **Uri** to
+`rtsp://<server-ip>:8554/wallpaper` and toggle **Video** on.
+
+## Notes
+
+- mediamtx handles multiple simultaneous viewers fine (not that you need
+  more than the TV), and is a real, independently maintained project --
+  nothing about it needs maintaining on your end beyond pulling image
+  updates occasionally.
+- Images refresh every `REFRESH_INTERVAL_HOURS` (default 24h); ffmpeg
+  restarts at that point, so the TV will show a brief black frame / reconnect
+  blip once a day. Not noticeable for a background.
+- Photos are Immich's "preview" size (not full originals), ~10-15MB per
+  sync -- living on your server's disk, not the TV's.
+- If the container restarts, it reuses whatever's cached in `/data` (a
+  named Docker volume) until the next scheduled refresh, so a quick
+  restart doesn't hammer your Immich server.
+
+## What else is in this repo
+
+This project grew out of a broader Android TV debloat job (disabling
+manufacturer bloat/telemetry on a Sony Android TV, exploring launcher
+options before settling on using Projectivy with this background service).
+That work -- `tools/`, `batches/`, `docs/IMMICH_SYNC_SERVER_SETUP.md` (an
+alternative adb-push-based approach to the same background-photos goal,
+superseded by the RTSP service above but kept as a documented fallback) --
+is still here but not what this repo is actively maintained for. See
+[docs/ANDROID_TV_DEBLOAT.md](docs/ANDROID_TV_DEBLOAT.md) for that side of
+things.
