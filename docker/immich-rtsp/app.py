@@ -151,6 +151,7 @@ def start_ffmpeg():
         "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
         "-g", "50",
         "-rtsp_flags", "listen",
+        "-listen_timeout", "-1",
         "-f", "rtsp", f"rtsp://0.0.0.0:{RTSP_PORT}/wallpaper",
     ]
     log(f"Starting ffmpeg: {' '.join(cmd)}")
