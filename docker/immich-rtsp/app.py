@@ -142,7 +142,7 @@ def sync_images():
 def start_ffmpeg():
     global ffmpeg_proc
     cmd = [
-        "ffmpeg", "-y",
+        "ffmpeg", "-y", "-loglevel", "warning",
         "-stream_loop", "-1",
         "-f", "concat", "-safe", "0", "-i", str(PLAYLIST_PATH),
         "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
@@ -154,7 +154,10 @@ def start_ffmpeg():
         "-f", "rtsp", f"rtsp://0.0.0.0:{RTSP_PORT}/wallpaper",
     ]
     log(f"Starting ffmpeg: {' '.join(cmd)}")
-    ffmpeg_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # stderr/stdout inherit the parent's (this process's) streams, so
+    # ffmpeg's actual errors land directly in `docker logs` instead of
+    # being swallowed in an unread pipe buffer.
+    ffmpeg_proc = subprocess.Popen(cmd)
 
 
 def stop_ffmpeg():
