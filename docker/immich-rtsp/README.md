@@ -43,9 +43,18 @@ Config reference:
 - `LANDSCAPE_ONLY` -- `true`/`false` (default `true`). Portrait photos get
   letterboxed with black bars on the sides rather than filling the screen,
   so this filters them out using Immich's reported width/height.
-- `SECONDS_PER_IMAGE` -- how long each photo stays on screen (default 15)
+- `SECONDS_PER_IMAGE` -- how long each photo is held before crossfading to
+  the next (default 15). Change takes effect on the next ffmpeg restart
+  (next sync, or just restart the `immich-rtsp` container -- no rebuild
+  needed, it's an env var, not a code change)
+- `FADE_SECONDS` -- crossfade duration between photos (default 1.5)
 - `REFRESH_INTERVAL_HOURS` -- how often to pull a fresh set from Immich,
   restarting ffmpeg (brief reconnect blip on the TV) each time (default 24)
+
+Each full pass through the photo set is one ffmpeg process (built as a
+chained `xfade` filter graph across every photo as its own input); it exits
+normally once the last crossfade finishes, and the service just restarts it
+-- that's what loops the slideshow, not an ffmpeg-internal loop flag.
 
 ## 3. Build the immich-rtsp image once via terminal
 

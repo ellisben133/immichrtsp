@@ -14,9 +14,15 @@ client is a far more standard, well-documented pattern.
 Config via environment variables (see .env.example):
   IMMICH_SERVER_URL, IMMICH_API_KEY, IMMICH_ALBUM_NAMES (comma separated)
   PHOTO_COUNT (default 20), SECONDS_PER_IMAGE (default 15)
+  FADE_SECONDS (default 1.5, crossfade duration between photos)
   REFRESH_INTERVAL_HOURS (default 24), RTSP_PUBLISH_URL
   (default rtsp://mediamtx:8554/wallpaper)
   WIDTH (default 1920), HEIGHT (default 1080)
+
+Each full cycle through the photo set is one ffmpeg invocation (built as a
+chained xfade filter graph across N per-image inputs); it exits normally
+after the last crossfade finishes, and the main loop below restarts it --
+that's what makes it loop forever, not an internal ffmpeg loop flag.
 """
 import json
 import os
@@ -32,14 +38,14 @@ from pathlib import Path
 
 DATA_DIR = Path("/data")
 IMAGES_DIR = DATA_DIR / "images"
-PLAYLIST_PATH = DATA_DIR / "playlist.txt"
 
 SERVER_URL = os.environ["IMMICH_SERVER_URL"]
 API_KEY = os.environ["IMMICH_API_KEY"]
 ALBUM_NAMES = [a.strip() for a in os.environ["IMMICH_ALBUM_NAMES"].split(",") if a.strip()]
 PHOTO_COUNT = int(os.environ.get("PHOTO_COUNT", "20"))
 LANDSCAPE_ONLY = os.environ.get("LANDSCAPE_ONLY", "true").strip().lower() not in ("false", "0", "no", "")
-SECONDS_PER_IMAGE = int(os.environ.get("SECONDS_PER_IMAGE", "15"))
+SECONDS_PER_IMAGE = float(os.environ.get("SECONDS_PER_IMAGE", "15"))
+FADE_SECONDS = float(os.environ.get("FADE_SECONDS", "1.5"))
 REFRESH_INTERVAL_HOURS = float(os.environ.get("REFRESH_INTERVAL_HOURS", "24"))
 RTSP_PUBLISH_URL = os.environ.get("RTSP_PUBLISH_URL", "rtsp://mediamtx:8554/wallpaper")
 WIDTH = os.environ.get("WIDTH", "1920")
@@ -143,32 +149,64 @@ def sync_images():
         shutil.rmtree(IMAGES_DIR)
     tmp_dir.rename(IMAGES_DIR)
 
-    playlist_lines = []
-    for img in sorted(IMAGES_DIR.glob("*.jpg")):
-        playlist_lines.append(f"file '{img}'")
-        playlist_lines.append(f"duration {SECONDS_PER_IMAGE}")
-    playlist_lines.append(f"file '{sorted(IMAGES_DIR.glob('*.jpg'))[0]}'")
-    PLAYLIST_PATH.write_text("\n".join(playlist_lines) + "\n", encoding="utf-8")
-
     log(f"Synced {len(written)} images, {total_mb:.1f} MB total.")
     return True
 
 
-def start_ffmpeg():
-    global ffmpeg_proc
-    cmd = [
-        "ffmpeg", "-y", "-loglevel", "warning",
-        "-re", "-stream_loop", "-1",
-        "-f", "concat", "-safe", "0", "-i", str(PLAYLIST_PATH),
-        "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
-               f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+def build_xfade_cmd(images):
+    """One ffmpeg invocation that crossfades through `images` once, then
+    exits normally -- the main loop restarts it, which is what makes the
+    whole thing loop forever. Each image is its own input (needed for
+    xfade, unlike the old single concat-demuxer input)."""
+    cmd = ["ffmpeg", "-y", "-loglevel", "warning"]
+    for img in images:
+        cmd += ["-re", "-loop", "1", "-t", str(SECONDS_PER_IMAGE + FADE_SECONDS), "-i", str(img)]
+
+    filters = []
+    for i in range(len(images)):
+        filters.append(
+            f"[{i}:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
+            f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1[v{i}]"
+        )
+
+    prev_label = "v0"
+    for i in range(1, len(images)):
+        offset = i * SECONDS_PER_IMAGE
+        out_label = f"vx{i}"
+        filters.append(
+            f"[{prev_label}][v{i}]xfade=transition=fade:duration={FADE_SECONDS}:offset={offset}[{out_label}]"
+        )
+        prev_label = out_label
+
+    cmd += [
+        "-filter_complex", ";".join(filters),
+        "-map", f"[{prev_label}]",
         "-r", "25",
         "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
         "-g", "50",
         "-rtsp_transport", "tcp",
         "-f", "rtsp", RTSP_PUBLISH_URL,
     ]
-    log(f"Starting ffmpeg: {' '.join(cmd)}")
+    return cmd
+
+
+def start_ffmpeg():
+    global ffmpeg_proc
+    images = sorted(IMAGES_DIR.glob("*.jpg"))
+    if len(images) < 2:
+        # xfade needs at least 2 inputs; fall back to a static single image
+        # (still looped/paced in real time) if we somehow only have one.
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "warning",
+            "-re", "-loop", "1", "-i", str(images[0]),
+            "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
+                   f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+            "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+            "-g", "50", "-rtsp_transport", "tcp", "-f", "rtsp", RTSP_PUBLISH_URL,
+        ]
+    else:
+        cmd = build_xfade_cmd(images)
+    log(f"Starting ffmpeg ({len(images)} images): {' '.join(cmd)}")
     # stderr/stdout inherit the parent's (this process's) streams, so
     # ffmpeg's actual errors land directly in `docker logs` instead of
     # being swallowed in an unread pipe buffer.
@@ -211,8 +249,8 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not safe_sync_images() and not PLAYLIST_PATH.exists():
-        sys.exit("Initial sync failed and no cached playlist exists. Exiting.")
+    if not safe_sync_images() and not any(IMAGES_DIR.glob("*.jpg")):
+        sys.exit("Initial sync failed and no cached images exist. Exiting.")
 
     start_ffmpeg()
     last_sync = time.monotonic()
