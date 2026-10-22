@@ -19,11 +19,9 @@ binding/listening, failing instantly on every run. Publishing to a real
 RTSP server is the standard, well-documented pattern, hence the second
 container.)
 
-**Tested/untested split, honestly:** the Immich-fetching code is the same
-logic already verified working against your server. The publish-to-mediamtx
-path is new and untested end-to-end on my side -- I don't have Docker
-available in this session to run it. Verify it (step 5 below) before
-pointing Projectivy at it.
+**Verified working end to end** (2026-10-23): confirmed live on the actual
+TV, rotating through real photos from both configured albums, via
+Projectivy's Media file source pointed at the stream.
 
 ## 1. Copy this folder to your server
 
@@ -37,7 +35,17 @@ cp .env.example .env
 ```
 
 Edit it: at minimum set `IMMICH_SERVER_URL` and `IMMICH_API_KEY`. Defaults:
-20 photos, 15 seconds each, refreshed every 24h.
+20 photos, landscape-only, 15 seconds each, refreshed every 24h.
+
+Config reference:
+- `IMMICH_ALBUM_NAMES` -- comma-separated, exact album names to pull from
+- `PHOTO_COUNT` -- how many photos to keep per sync (default 20)
+- `LANDSCAPE_ONLY` -- `true`/`false` (default `true`). Portrait photos get
+  letterboxed with black bars on the sides rather than filling the screen,
+  so this filters them out using Immich's reported width/height.
+- `SECONDS_PER_IMAGE` -- how long each photo stays on screen (default 15)
+- `REFRESH_INTERVAL_HOURS` -- how often to pull a fresh set from Immich,
+  restarting ffmpeg (brief reconnect blip on the TV) each time (default 24)
 
 ## 3. Build the immich-rtsp image once via terminal
 

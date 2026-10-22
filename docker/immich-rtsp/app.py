@@ -38,6 +38,7 @@ SERVER_URL = os.environ["IMMICH_SERVER_URL"]
 API_KEY = os.environ["IMMICH_API_KEY"]
 ALBUM_NAMES = [a.strip() for a in os.environ["IMMICH_ALBUM_NAMES"].split(",") if a.strip()]
 PHOTO_COUNT = int(os.environ.get("PHOTO_COUNT", "20"))
+LANDSCAPE_ONLY = os.environ.get("LANDSCAPE_ONLY", "true").strip().lower() not in ("false", "0", "no", "")
 SECONDS_PER_IMAGE = int(os.environ.get("SECONDS_PER_IMAGE", "15"))
 REFRESH_INTERVAL_HOURS = float(os.environ.get("REFRESH_INTERVAL_HOURS", "24"))
 RTSP_PUBLISH_URL = os.environ.get("RTSP_PUBLISH_URL", "rtsp://mediamtx:8554/wallpaper")
@@ -102,6 +103,11 @@ def sync_images():
         assets = get_album_assets(album["id"])
         log(f"  {name}: {len(assets)} photos")
         pool.extend(assets)
+
+    if LANDSCAPE_ONLY:
+        before = len(pool)
+        pool = [a for a in pool if a.get("width", 0) >= a.get("height", 0)]
+        log(f"  landscape filter: {len(pool)} of {before} photos kept")
 
     if not pool:
         log("No photos found this sync, keeping existing set.")
