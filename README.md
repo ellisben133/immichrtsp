@@ -92,8 +92,13 @@ Config reference:
   (next sync, or just restart the `immich-rtsp` container -- no rebuild
   needed, it's an env var, not a code change)
 - `FADE_SECONDS` -- crossfade duration between photos (default 1.5)
-- `REFRESH_INTERVAL_HOURS` -- how often to pull a fresh set from Immich,
-  restarting ffmpeg (brief reconnect blip on the TV) each time (default 24)
+- `SYNC_HOUR` / `SYNC_MINUTE` -- local-time daily resync (default 2:00am),
+  restarting ffmpeg (brief reconnect blip on the TV) once a day at that
+  time rather than N hours after the container last started
+- `TZ` -- what "local time" means for `SYNC_HOUR` (default
+  `Australia/Sydney`), e.g. `TZ=America/New_York`. Without this the
+  container runs on UTC, so 2am would actually fire at whatever UTC+0
+  looks like for you
 
 Each sync *renders* the crossfaded slideshow to a file first: each photo
 becomes its own small, constant-cost segment (its handoff crossfade
@@ -103,6 +108,13 @@ it restarts the lightweight `-c copy` stream that loops that file to
 mediamtx. See the two resource-usage notes above for why it's built this
 way and not as one continuous multi-input ffmpeg process (or a naive
 chain that re-encodes everything so far at every step).
+
+Segments encode with libx264's `ultrafast` preset -- real per-core CPU
+performance on the host this was deployed to turned out much lower than
+the dev machine this was built on (local testing showed ~5s/segment; the
+real host took ~50-60s/segment on `veryfast` before this change), so
+`ultrafast` trades a bit of compression efficiency for meaningfully faster
+renders. Imperceptible for a background slideshow either way.
 
 ## 3. Build the immich-rtsp image once via terminal
 

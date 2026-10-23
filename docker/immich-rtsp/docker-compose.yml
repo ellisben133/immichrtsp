@@ -40,7 +40,9 @@ services:
       LANDSCAPE_ONLY: ${LANDSCAPE_ONLY:-true}
       SECONDS_PER_IMAGE: ${SECONDS_PER_IMAGE:-15}
       FADE_SECONDS: ${FADE_SECONDS:-1.5}
-      REFRESH_INTERVAL_HOURS: ${REFRESH_INTERVAL_HOURS:-24}
+      SYNC_HOUR: ${SYNC_HOUR:-2}
+      SYNC_MINUTE: ${SYNC_MINUTE:-0}
+      TZ: ${TZ:-Australia/Sydney}
       RTSP_PUBLISH_URL: ${RTSP_PUBLISH_URL:-rtsp://mediamtx:8554/wallpaper}
       WIDTH: ${WIDTH:-1920}
       HEIGHT: ${HEIGHT:-1080}

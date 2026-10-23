@@ -15,8 +15,9 @@ Config via environment variables (see .env.example):
   IMMICH_SERVER_URL, IMMICH_API_KEY, IMMICH_ALBUM_NAMES (comma separated)
   PHOTO_COUNT (default 20), SECONDS_PER_IMAGE (default 15)
   FADE_SECONDS (default 1.5, crossfade duration between photos)
-  REFRESH_INTERVAL_HOURS (default 24), RTSP_PUBLISH_URL
-  (default rtsp://mediamtx:8554/wallpaper)
+  SYNC_HOUR / SYNC_MINUTE (default 2 / 0, daily local-time resync),
+  TZ (e.g. Australia/Sydney -- what "local time" means for SYNC_HOUR)
+  RTSP_PUBLISH_URL (default rtsp://mediamtx:8554/wallpaper)
   WIDTH (default 1920), HEIGHT (default 1080)
 
 Two-stage design (changed after an earlier version OOM'd a 2 CPU / 4GB
@@ -31,6 +32,7 @@ live input for the entire streaming lifetime -- correct output, but a
 completely different and much heavier resource profile that wasn't caught
 by local testing with only 3 images.
 """
+import datetime
 import json
 import os
 import random
@@ -43,6 +45,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# Make datetime.now() respect the TZ env var (set in docker-compose.yml) --
+# without this, glibc may not pick up a TZ change made after the process's
+# own startup environment was read.
+if hasattr(time, "tzset"):
+    time.tzset()
+
 DATA_DIR = Path("/data")
 IMAGES_DIR = DATA_DIR / "images"
 SLIDESHOW_PATH = DATA_DIR / "slideshow.mp4"
@@ -54,7 +62,8 @@ PHOTO_COUNT = int(os.environ.get("PHOTO_COUNT", "20"))
 LANDSCAPE_ONLY = os.environ.get("LANDSCAPE_ONLY", "true").strip().lower() not in ("false", "0", "no", "")
 SECONDS_PER_IMAGE = float(os.environ.get("SECONDS_PER_IMAGE", "15"))
 FADE_SECONDS = float(os.environ.get("FADE_SECONDS", "1.5"))
-REFRESH_INTERVAL_HOURS = float(os.environ.get("REFRESH_INTERVAL_HOURS", "24"))
+SYNC_HOUR = int(os.environ.get("SYNC_HOUR", "2"))
+SYNC_MINUTE = int(os.environ.get("SYNC_MINUTE", "0"))
 RTSP_PUBLISH_URL = os.environ.get("RTSP_PUBLISH_URL", "rtsp://mediamtx:8554/wallpaper")
 WIDTH = os.environ.get("WIDTH", "1920")
 HEIGHT = os.environ.get("HEIGHT", "1080")
@@ -207,7 +216,7 @@ def render_slideshow(images):
             "ffmpeg", "-y", "-loglevel", "warning",
             "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(images[0]),
             "-vf", _scale_pad_expr(),
-            "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+            "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
             str(render_dir / "final.mp4"),
         ]
         log("Rendering single-image slideshow...")
@@ -220,7 +229,7 @@ def render_slideshow(images):
             "ffmpeg", "-y", "-loglevel", "warning",
             "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(images[0]),
             "-vf", _scale_pad_expr(),
-            "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+            "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
             str(seg0),
         ]
         log(f"Rendering slideshow, segment 1/{len(images)}...")
@@ -238,7 +247,7 @@ def render_slideshow(images):
                 f"[1:v]{_scale_pad_expr()},fps=25[vnew];"
                 f"[vtail][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset=0[vout]",
                 "-map", "[vout]",
-                "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+                "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
                 str(seg_path),
             ]
             log(f"Rendering slideshow, segment {i + 1}/{len(images)}...")
@@ -317,6 +326,15 @@ def safe_sync_images():
         return False
 
 
+def next_sync_at(after):
+    """Next datetime at SYNC_HOUR:SYNC_MINUTE (local time), strictly after
+    `after` -- today if that time hasn't passed yet, tomorrow otherwise."""
+    candidate = after.replace(hour=SYNC_HOUR, minute=SYNC_MINUTE, second=0, microsecond=0)
+    if candidate <= after:
+        candidate += datetime.timedelta(days=1)
+    return candidate
+
+
 def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -326,8 +344,8 @@ def main():
         sys.exit("Initial sync failed and no cached slideshow exists. Exiting.")
 
     start_ffmpeg()
-    last_sync = time.monotonic()
-    refresh_seconds = REFRESH_INTERVAL_HOURS * 3600
+    next_sync = next_sync_at(datetime.datetime.now())
+    log(f"Next scheduled sync: {next_sync.isoformat()} ({time.tzname[0] if hasattr(time, 'tzname') else 'local'})")
 
     while not shutting_down:
         time.sleep(5)
@@ -336,12 +354,14 @@ def main():
             time.sleep(2)
             start_ffmpeg()
             continue
-        if time.monotonic() - last_sync >= refresh_seconds:
+        now = datetime.datetime.now()
+        if now >= next_sync:
             if safe_sync_images():
                 log("Restarting ffmpeg with refreshed images...")
                 stop_ffmpeg()
                 start_ffmpeg()
-            last_sync = time.monotonic()
+            next_sync = next_sync_at(now)
+            log(f"Next scheduled sync: {next_sync.isoformat()}")
 
 
 if __name__ == "__main__":
