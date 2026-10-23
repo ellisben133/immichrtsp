@@ -186,6 +186,23 @@ def _run_ffmpeg_render(cmd, out_path):
         raise RuntimeError("ffmpeg render step failed")
 
 
+def _prescale_image(src, dst):
+    """Scale/pad an image to WxH exactly once. Used so the per-frame hot
+    path (each image gets decoded ~375+ times as a -loop 1 source) only
+    ever does a cheap format conversion, not a full resize -- found via
+    local profiling that the resize filter, not the encoder preset, was
+    the dominant cost: removing it was roughly as big a win as switching
+    ultrafast<->veryfast, and the two stack additively."""
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "warning",
+        "-i", str(src),
+        "-vf", _scale_pad_expr(),
+        "-frames:v", "1",
+        str(dst),
+    ]
+    _run_ffmpeg_render(cmd, dst)
+
+
 def render_slideshow(images):
     """Builds the crossfaded slideshow as an actual file.
 
@@ -211,11 +228,19 @@ def render_slideshow(images):
         shutil.rmtree(render_dir)
     render_dir.mkdir(parents=True, exist_ok=True)
 
-    if len(images) == 1:
+    prescaled_dir = render_dir / "prescaled"
+    prescaled_dir.mkdir(parents=True, exist_ok=True)
+    prescaled = []
+    for i, img in enumerate(images):
+        dst = prescaled_dir / f"pre{i:03d}.jpg"
+        _prescale_image(img, dst)
+        prescaled.append(dst)
+
+    if len(prescaled) == 1:
         cmd = [
             "ffmpeg", "-y", "-loglevel", "warning",
-            "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(images[0]),
-            "-vf", _scale_pad_expr(),
+            "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[0]),
+            "-vf", "format=yuv420p,setsar=1",
             "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
             str(render_dir / "final.mp4"),
         ]
@@ -227,30 +252,30 @@ def render_slideshow(images):
         seg0 = render_dir / "seg000.mp4"
         cmd = [
             "ffmpeg", "-y", "-loglevel", "warning",
-            "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(images[0]),
-            "-vf", _scale_pad_expr(),
+            "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[0]),
+            "-vf", "format=yuv420p,setsar=1",
             "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
             str(seg0),
         ]
-        log(f"Rendering slideshow, segment 1/{len(images)}...")
+        log(f"Rendering slideshow, segment 1/{len(prescaled)}...")
         _run_ffmpeg_render(cmd, seg0)
         segments.append(seg0)
 
-        for i in range(1, len(images)):
+        for i in range(1, len(prescaled)):
             seg_path = render_dir / f"seg{i:03d}.mp4"
             cmd = [
                 "ffmpeg", "-y", "-loglevel", "warning",
-                "-loop", "1", "-t", str(FADE_SECONDS), "-i", str(images[i - 1]),
-                "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(images[i]),
+                "-loop", "1", "-t", str(FADE_SECONDS), "-i", str(prescaled[i - 1]),
+                "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[i]),
                 "-filter_complex",
-                f"[0:v]{_scale_pad_expr()},fps=25[vtail];"
-                f"[1:v]{_scale_pad_expr()},fps=25[vnew];"
+                f"[0:v]format=yuv420p,setsar=1,fps=25[vtail];"
+                f"[1:v]format=yuv420p,setsar=1,fps=25[vnew];"
                 f"[vtail][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset=0[vout]",
                 "-map", "[vout]",
                 "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
                 str(seg_path),
             ]
-            log(f"Rendering slideshow, segment {i + 1}/{len(images)}...")
+            log(f"Rendering slideshow, segment {i + 1}/{len(prescaled)}...")
             _run_ffmpeg_render(cmd, seg_path)
             segments.append(seg_path)
 
