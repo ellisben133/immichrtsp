@@ -285,9 +285,14 @@ def render_slideshow(images):
                 "-loop", "1", "-t", str(FADE_SECONDS), "-i", str(prescaled[i - 1]),
                 "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[i]),
                 "-filter_complex",
+                # xfade blends at higher internal precision and emits
+                # yuv444p even though both inputs are yuv420p -- without
+                # forcing format=yuv420p again on its output, libx264 encodes
+                # High 4:4:4 Predictive profile, which this TV's hardware
+                # decoder can't play (silently fails, no frames ever render).
                 f"[0:v]format=yuv420p,setsar=1,fps=25[vtail];"
                 f"[1:v]format=yuv420p,setsar=1,fps=25[vnew];"
-                f"[vtail][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset=0[vout]",
+                f"[vtail][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset=0,format=yuv420p[vout]",
                 "-map", "[vout]",
                 "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
                 *X264_VBV_ARGS,
