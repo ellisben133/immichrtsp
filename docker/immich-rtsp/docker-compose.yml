@@ -24,11 +24,13 @@ services:
     # Hard caps so this can never again threaten whatever else is running
     # on the host, regardless of what goes wrong -- after the first version
     # OOM'd a 2 CPU / 4GB shared container by keeping every photo open as
-    # a simultaneous live ffmpeg input. The new render-then-stream design
-    # (see app.py) shouldn't need anywhere near this much, but a hard
-    # ceiling costs nothing and means a future bug fails loudly (OOM-killed
-    # container, visible in logs) instead of starving the whole host.
-    mem_limit: 768m
+    # a simultaneous live ffmpeg input. The render-then-stream design (see
+    # app.py) only needs real memory briefly during the render step, not
+    # continuously, so 1.5GB headroom there is fine -- a short-lived spike,
+    # not a sustained claim on the host's 4GB. A hard ceiling still costs
+    # nothing and means a future bug fails loudly (OOM-killed container,
+    # visible in logs) instead of starving the whole host.
+    mem_limit: 1536m
     cpus: 1.0
     environment:
       IMMICH_SERVER_URL: ${IMMICH_SERVER_URL}
