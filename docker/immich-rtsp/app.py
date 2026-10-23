@@ -169,10 +169,6 @@ def _scale_pad_expr():
     )
 
 
-def _scale_pad_filter(input_label, output_label):
-    return f"[{input_label}]{_scale_pad_expr()}[{output_label}]"
-
-
 def _run_ffmpeg_render(cmd, out_path):
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0 or not out_path.exists():
@@ -182,17 +178,29 @@ def _run_ffmpeg_render(cmd, out_path):
 
 
 def render_slideshow(images):
-    """Builds the crossfaded slideshow as an actual file, combining photos
-    two at a time in a chain -- at most 2 real inputs open in any single
-    ffmpeg call, regardless of how many photos there are. Runs once per
-    sync (REFRESH_INTERVAL_HOURS), not continuously, so a brief CPU/memory
-    cost here is fine even on a small shared host."""
+    """Builds the crossfaded slideshow as an actual file.
+
+    Earlier version chained crossfades by re-reading and re-encoding the
+    *entire accumulated slideshow so far* at every step -- bounded to 2
+    concurrent inputs (so it didn't repeat the original OOM), but total
+    work still grew with roughly the square of the photo count, since
+    step i re-encoded ~i photos worth of video just to add one more. On
+    a 2 CPU / 4GB shared host that meant later steps took increasingly
+    long and pushed memory into swap, discovered only once the render
+    was running against 20 real photos -- the 6-image local test never
+    ran long enough to show it.
+
+    This version makes every step's cost constant, independent of N:
+    each photo's "handoff" tail is regenerated fresh from its own raw
+    JPEG (cheap -- a few seconds of re-decoding one image, not
+    re-encoding the growing whole), crossfaded against the next photo
+    into a small standalone segment, and every segment is stitched
+    together at the end with a lossless -c copy concat (no re-encoding
+    of anything already finished)."""
     render_dir = DATA_DIR / "render"
     if render_dir.exists():
         shutil.rmtree(render_dir)
     render_dir.mkdir(parents=True, exist_ok=True)
-
-    hold_tail = SECONDS_PER_IMAGE + FADE_SECONDS
 
     if len(images) == 1:
         cmd = [
@@ -205,45 +213,53 @@ def render_slideshow(images):
         log("Rendering single-image slideshow...")
         _run_ffmpeg_render(cmd, render_dir / "final.mp4")
     else:
-        prev_file = render_dir / "step000.mp4"
+        segments = []
+
+        seg0 = render_dir / "seg000.mp4"
         cmd = [
             "ffmpeg", "-y", "-loglevel", "warning",
-            "-loop", "1", "-t", str(hold_tail), "-i", str(images[0]),
+            "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(images[0]),
             "-vf", _scale_pad_expr(),
             "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
-            str(prev_file),
+            str(seg0),
         ]
-        log(f"Rendering slideshow, step 1/{len(images)}...")
-        _run_ffmpeg_render(cmd, prev_file)
-        prev_duration = hold_tail
+        log(f"Rendering slideshow, segment 1/{len(images)}...")
+        _run_ffmpeg_render(cmd, seg0)
+        segments.append(seg0)
 
         for i in range(1, len(images)):
-            out_file = render_dir / f"step{i:03d}.mp4"
-            offset = prev_duration - FADE_SECONDS
+            seg_path = render_dir / f"seg{i:03d}.mp4"
             cmd = [
                 "ffmpeg", "-y", "-loglevel", "warning",
-                "-i", str(prev_file),
-                "-loop", "1", "-t", str(hold_tail), "-i", str(images[i]),
+                "-loop", "1", "-t", str(FADE_SECONDS), "-i", str(images[i - 1]),
+                "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(images[i]),
                 "-filter_complex",
-                # xfade requires both inputs to share a timebase; the
-                # already-encoded prev_file and a fresh -loop 1 image
-                # source don't by default (found by actually running
-                # this, not by inspection -- "First input link main
-                # timebase do not match the corresponding second input
-                # link xfade timebase"). fps=25 on both normalizes it.
-                f"[0:v]fps=25[vprev];" + _scale_pad_filter("1:v", "vnew") +
-                f";[vprev][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset={offset}[vout]",
+                f"[0:v]{_scale_pad_expr()},fps=25[vtail];"
+                f"[1:v]{_scale_pad_expr()},fps=25[vnew];"
+                f"[vtail][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset=0[vout]",
                 "-map", "[vout]",
                 "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
-                str(out_file),
+                str(seg_path),
             ]
-            log(f"Rendering slideshow, step {i + 1}/{len(images)}...")
-            _run_ffmpeg_render(cmd, out_file)
-            prev_file.unlink(missing_ok=True)
-            prev_file = out_file
-            prev_duration = prev_duration + SECONDS_PER_IMAGE
+            log(f"Rendering slideshow, segment {i + 1}/{len(images)}...")
+            _run_ffmpeg_render(cmd, seg_path)
+            segments.append(seg_path)
 
-        prev_file.rename(render_dir / "final.mp4")
+        concat_list = render_dir / "concat.txt"
+        concat_list.write_text(
+            "\n".join(f"file '{s.resolve().as_posix()}'" for s in segments) + "\n",
+            encoding="utf-8",
+        )
+        final_path = render_dir / "final.mp4"
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "warning",
+            "-f", "concat", "-safe", "0", "-i", str(concat_list),
+            "-c", "copy", str(final_path),
+        ]
+        log("Stitching segments together...")
+        _run_ffmpeg_render(cmd, final_path)
+        for s in segments:
+            s.unlink(missing_ok=True)
 
     tmp_path = DATA_DIR / "slideshow.mp4.new"
     shutil.move(str(render_dir / "final.mp4"), str(tmp_path))

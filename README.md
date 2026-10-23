@@ -40,10 +40,27 @@ also now carry hard `mem_limit`/`cpus` caps in `docker-compose.yml`, so a
 future bug fails loudly (the container gets OOM-killed, visible in its own
 logs) instead of starving the host.
 
+**A third thing, caught deploying the fix above rather than beforehand:**
+that first "render" design still chained crossfades by re-reading and
+re-encoding the *entire accumulated slideshow so far* at every step --
+bounded to 2 concurrent inputs (so no repeat of the OOM), but total work
+still grew with roughly the square of the photo count, since step *i*
+re-encoded ~*i* photos worth of video just to add one more. Caught live:
+swap climbed from near-zero to 27% while still only on step 2 of 20, and
+each step was visibly taking longer than the last. The current version
+regenerates each photo's crossfade "handoff" fresh from its own raw JPEG
+(cheap, a few seconds of re-decoding one image) rather than from the
+growing rendered file, then stitches every segment together losslessly at
+the end -- constant cost per step regardless of position in the sequence.
+Verified locally before shipping again: 10 full-1920x1080 images at real
+`SECONDS_PER_IMAGE=15`/`FADE_SECONDS=1.5` settings rendered in 64s total
+with per-segment timing staying flat (4.3-7.3s each, no growth trend), and
+the stitched output decoded start-to-finish with zero errors.
+
 **Verified working end to end** (2026-10-23): confirmed live on the actual
 TV, crossfading through real photos from both configured albums, via
-Projectivy's Media file source pointed at the stream -- both before and
-after the resource-usage fix above.
+Projectivy's Media file source pointed at the stream -- across all three
+iterations of this feature above.
 
 ## 1. Copy the `docker/immich-rtsp/` folder to your server
 
@@ -78,11 +95,14 @@ Config reference:
 - `REFRESH_INTERVAL_HOURS` -- how often to pull a fresh set from Immich,
   restarting ffmpeg (brief reconnect blip on the TV) each time (default 24)
 
-Each sync *renders* the crossfaded slideshow to a file (combining photos
-two at a time in a chain, never more than 2 real inputs open regardless of
-`PHOTO_COUNT`), then restarts the lightweight `-c copy` stream that loops
-that file to mediamtx -- see the resource-usage note above for why it's
-built this way and not as one continuous multi-input ffmpeg process.
+Each sync *renders* the crossfaded slideshow to a file first: each photo
+becomes its own small, constant-cost segment (its handoff crossfade
+regenerated fresh from the raw JPEG, not from any growing accumulated
+file), and all segments are stitched together losslessly at the end. Then
+it restarts the lightweight `-c copy` stream that loops that file to
+mediamtx. See the two resource-usage notes above for why it's built this
+way and not as one continuous multi-input ffmpeg process (or a naive
+chain that re-encodes everything so far at every step).
 
 ## 3. Build the immich-rtsp image once via terminal
 
