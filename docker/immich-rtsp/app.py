@@ -242,7 +242,6 @@ def render_slideshow(images):
             "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[0]),
             "-vf", "format=yuv420p,setsar=1",
             "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
-            "-x264-params", "slice-max-size=1400",
             str(render_dir / "final.mp4"),
         ]
         log("Rendering single-image slideshow...")
@@ -256,7 +255,6 @@ def render_slideshow(images):
             "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[0]),
             "-vf", "format=yuv420p,setsar=1",
             "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
-            "-x264-params", "slice-max-size=1400",
             str(seg0),
         ]
         log(f"Rendering slideshow, segment 1/{len(prescaled)}...")
@@ -275,7 +273,6 @@ def render_slideshow(images):
                 f"[vtail][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset=0[vout]",
                 "-map", "[vout]",
                 "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
-                "-x264-params", "slice-max-size=1400",
                 str(seg_path),
             ]
             log(f"Rendering slideshow, segment {i + 1}/{len(prescaled)}...")
@@ -314,7 +311,8 @@ def start_ffmpeg():
         "ffmpeg", "-y", "-loglevel", "warning",
         "-re", "-stream_loop", "-1", "-i", str(SLIDESHOW_PATH),
         "-c", "copy",
-        "-rtsp_transport", "tcp", "-f", "rtsp", RTSP_PUBLISH_URL,
+        "-rtsp_transport", "tcp", "-pkt_size", "1200",
+        "-f", "rtsp", RTSP_PUBLISH_URL,
     ]
     log(f"Starting ffmpeg (streaming {SLIDESHOW_PATH}): {' '.join(cmd)}")
     # stderr/stdout inherit the parent's (this process's) streams, so
