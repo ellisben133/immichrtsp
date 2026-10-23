@@ -242,6 +242,7 @@ def render_slideshow(images):
             "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[0]),
             "-vf", "format=yuv420p,setsar=1",
             "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+            "-x264-params", "slice-max-size=1400",
             str(render_dir / "final.mp4"),
         ]
         log("Rendering single-image slideshow...")
@@ -255,6 +256,7 @@ def render_slideshow(images):
             "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[0]),
             "-vf", "format=yuv420p,setsar=1",
             "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+            "-x264-params", "slice-max-size=1400",
             str(seg0),
         ]
         log(f"Rendering slideshow, segment 1/{len(prescaled)}...")
@@ -273,6 +275,7 @@ def render_slideshow(images):
                 f"[vtail][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset=0[vout]",
                 "-map", "[vout]",
                 "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+                "-x264-params", "slice-max-size=1400",
                 str(seg_path),
             ]
             log(f"Rendering slideshow, segment {i + 1}/{len(prescaled)}...")
