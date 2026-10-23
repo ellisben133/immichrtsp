@@ -178,6 +178,21 @@ def _scale_pad_expr():
     )
 
 
+# Real photo keyframes with no VBV cap measured at 400KB+ on an otherwise
+# ~15s/1.5Mbps-average segment -- a burst `-re` real-time pacing pushes out
+# near-instantly, which overwhelmed mediamtx/the TV's receive buffering
+# ("reader is too slow, discarding frames", repeated disconnects). All
+# earlier local testing used flat-color/synthetic images whose keyframes
+# are negligible in size, which is why this wasn't caught sooner. Capping
+# peak bitrate brought the same keyframe down to ~53KB. -g/-sc_threshold
+# keep each segment to exactly one keyframe (at the start) rather than
+# x264's default ~10s keyint inserting another mid-segment.
+X264_VBV_ARGS = [
+    "-maxrate", "1.5M", "-bufsize", "750k",
+    "-g", "9999", "-sc_threshold", "0",
+]
+
+
 def _run_ffmpeg_render(cmd, out_path):
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0 or not out_path.exists():
@@ -242,6 +257,7 @@ def render_slideshow(images):
             "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[0]),
             "-vf", "format=yuv420p,setsar=1",
             "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+            *X264_VBV_ARGS,
             str(render_dir / "final.mp4"),
         ]
         log("Rendering single-image slideshow...")
@@ -255,6 +271,7 @@ def render_slideshow(images):
             "-loop", "1", "-t", str(SECONDS_PER_IMAGE), "-i", str(prescaled[0]),
             "-vf", "format=yuv420p,setsar=1",
             "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+            *X264_VBV_ARGS,
             str(seg0),
         ]
         log(f"Rendering slideshow, segment 1/{len(prescaled)}...")
@@ -273,6 +290,7 @@ def render_slideshow(images):
                 f"[vtail][vnew]xfade=transition=fade:duration={FADE_SECONDS}:offset=0[vout]",
                 "-map", "[vout]",
                 "-r", "25", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+                *X264_VBV_ARGS,
                 str(seg_path),
             ]
             log(f"Rendering slideshow, segment {i + 1}/{len(prescaled)}...")
